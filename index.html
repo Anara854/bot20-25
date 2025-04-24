@@ -6,103 +6,97 @@
   <style>
     body { font-family: sans-serif; text-align: center; padding: 20px; }
     video, canvas { width: 300px; border: 2px solid #ccc; border-radius: 10px; }
-    #status, #serialStatus, #alertMsg { font-size: 1.2em; margin-top: 10px; white-space: pre-line; }
+    #status, #serialStatus { font-size: 1.2em; margin-top: 10px; white-space: pre-line; }
     button { padding: 10px 20px; font-size: 1em; margin-top: 10px; }
   </style>
-
-  <!-- TensorFlow.js -->
-  <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@3.21.0/dist/tf.min.js"></script>
-
-  <!-- Teachable Machine -->
-  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
 </head>
 <body>
   <h1>SOS-Бот — Помощь рядом</h1>
 
   <div id="webcam"></div>
   <div id="status">Ожидание модели...</div>
-  <div id="alertMsg"></div>
 
   <button onclick="connectToArduino()">🔌 Подключиться к Arduino</button>
   <div id="serialStatus">Статус порта: не подключено</div>
 
+  <script src="https://cdn.jsdelivr.net/npm/@teachablemachine/image@0.8/dist/teachablemachine-image.min.js"></script>
+
   <script>
-    const URL = "https://anara854.github.io/bot20-25/"; // Путь к модели
-    let model, webcam, maxPredictions;
-    let port;
+  const URL = "https://anara854.github.io/bot20-25/"; // Путь к модели на GitHub Pages
+  let model, webcam, maxPredictions;
+  let port; // Переменная для порта
 
-    async function setupCamera() {
+  async function setupCamera() {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      const videoElement = document.createElement('video');
+      videoElement.srcObject = stream;
+      document.getElementById('webcam').appendChild(videoElement);
+      videoElement.play();
+      await init();
+    } catch (err) {
+      console.error('Ошибка камеры: ', err);
+      alert('Не удалось получить доступ к камере.');
+    }
+  }
+
+  async function init() {
+    const modelURL = URL + "model.json";
+    const metadataURL = URL + "metadata.json";
+    model = await tmImage.load(modelURL, metadataURL);
+    maxPredictions = model.getTotalClasses();
+
+    webcam = new tmImage.Webcam(300, 300, true);
+    await webcam.setup();
+    await webcam.play();
+    document.getElementById("webcam").appendChild(webcam.canvas);
+
+    window.requestAnimationFrame(loop);
+  }
+
+  async function connectToArduino() {
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 9600 });
+      document.getElementById("serialStatus").textContent = "✅ Порт подключен";
+      console.log("✅ Порт подключен!");
+    } catch (err) {
+      document.getElementById("serialStatus").textContent = "❌ Ошибка подключения";
+      console.error("❌ Ошибка подключения:", err);
+    }
+  }
+
+  async function loop() {
+    webcam.update();
+    await predict();
+    window.requestAnimationFrame(loop);
+  }
+
+  async function predict() {
+    const prediction = await model.predict(webcam.canvas);
+    console.log("Все предсказания:", prediction);
+
+    const topPrediction = prediction.reduce((max, p) => p.probability > max.probability ? p : max);
+    const confidence = (topPrediction.probability * 100).toFixed(1);
+    const className = topPrediction.className;
+
+    document.getElementById("status").textContent = `🔍 Класс: ${className} (${confidence}%)`;
+
+    // Отправляем данные на Arduino, если класс "1" распознан с вероятностью больше 95%
+    if (topPrediction.probability > 0.95 && className === "1" && port && port.writable) {
       try {
-        webcam = new tmImage.Webcam(300, 300, true);
-        await webcam.setup();
-        await webcam.play();
-        document.getElementById("webcam").appendChild(webcam.canvas);
-        await init();
-        window.requestAnimationFrame(loop);
+        const writer = port.writable.getWriter();
+        const data = new TextEncoder().encode("1\n"); // Отправляем команду "1"
+        await writer.write(data);
+        writer.releaseLock();
+        console.log(`✅ Отправлено в Arduino: '1' (по классу: ${className})`);
       } catch (err) {
-        console.error("Ошибка камеры:", err);
-        alert("Не удалось получить доступ к камере.");
+        console.error("❌ Ошибка при отправке в Arduino:", err);
       }
     }
+  }
 
-    async function init() {
-      const modelURL = URL + "model.json";
-      const metadataURL = URL + "metadata.json";
-      try {
-        model = await tmImage.load(modelURL, metadataURL);
-        maxPredictions = model.getTotalClasses();
-      } catch (err) {
-        console.error("Ошибка загрузки модели:", err);
-        document.getElementById("status").textContent = "Ошибка загрузки модели";
-      }
-    }
-
-    async function connectToArduino() {
-      try {
-        port = await navigator.serial.requestPort();
-        await port.open({ baudRate: 9600 });
-        document.getElementById("serialStatus").textContent = "✅ Порт подключен";
-        console.log("✅ Arduino подключено!");
-      } catch (err) {
-        document.getElementById("serialStatus").textContent = "❌ Ошибка подключения";
-        console.error("❌ Не удалось подключиться к Arduino:", err);
-      }
-    }
-
-    async function loop() {
-      webcam.update();
-      await predict();
-      window.requestAnimationFrame(loop);
-    }
-
-    async function predict() {
-      const prediction = await model.predict(webcam.canvas);
-      const topPrediction = prediction.reduce((max, p) => p.probability > max.probability ? p : max);
-      const confidence = (topPrediction.probability * 100).toFixed(1);
-      const className = topPrediction.className;
-
-      document.getElementById("status").textContent = `🔍 Класс: ${className} (${confidence}%)`;
-
-      // Если класс 1 обнаружен
-      if (topPrediction.className === "1" && topPrediction.probability > 0.95) {
-        document.getElementById("alertMsg").textContent = "⚠️ Обнаружен класс 1 — отправка сигнала!";
-        if (port && port.writable) {
-          try {
-            const writer = port.writable.getWriter();
-            const data = new TextEncoder().encode("1\n");
-            await writer.write(data);
-            writer.releaseLock();
-            console.log("✅ Сигнал '1' отправлен в Arduino");
-          } catch (err) {
-            console.error("❌ Ошибка отправки в Arduino:", err);
-          }
-        }
-      } else {
-        document.getElementById("alertMsg").textContent = "";
-      }
-    }
-
-    setupCamera();
+  setupCamera();
   </script>
 </body>
 </html>
